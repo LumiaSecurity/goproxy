@@ -388,8 +388,11 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 					text := resp.Status
 					statusCode := strconv.Itoa(resp.StatusCode) + " "
 					text = strings.TrimPrefix(text, statusCode)
+					// Buffer the head so it ships as one TLS record; per-write records
+					// fragment the 101 and trip strict clients' handshake attack checks.
+					headWriter := bufio.NewWriter(rawClientTls)
 					// always use 1.1 to support chunked encoding
-					if _, err := io.WriteString(rawClientTls, "HTTP/1.1"+" "+statusCode+text+"\r\n"); err != nil {
+					if _, err := io.WriteString(headWriter, "HTTP/1.1"+" "+statusCode+text+"\r\n"); err != nil {
 						ctx.Warnf("Cannot write TLS response HTTP status from mitm'd client: %v", err)
 						return false
 					}
@@ -411,12 +414,16 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 					// if !isWebsocket {
 					// 	resp.Header.Set("Connection", "close")
 					// }
-					if err := resp.Header.Write(rawClientTls); err != nil {
+					if err := resp.Header.Write(headWriter); err != nil {
 						ctx.Warnf("Cannot write TLS response header from mitm'd client: %v", err)
 						return false
 					}
-					if _, err = io.WriteString(rawClientTls, "\r\n"); err != nil {
+					if _, err = io.WriteString(headWriter, "\r\n"); err != nil {
 						ctx.Warnf("Cannot write TLS response header end from mitm'd client: %v", err)
+						return false
+					}
+					if err := headWriter.Flush(); err != nil {
+						ctx.Warnf("Cannot flush TLS response head from mitm'd client: %v", err)
 						return false
 					}
 
