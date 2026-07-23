@@ -48,6 +48,14 @@ func (r *RequestReader) Reader() *bufio.Reader {
 	return r.reader
 }
 
+// Buffered returns the number of bytes that have been read from the underlying
+// connection into the buffer but not yet consumed. This is the read-ahead that
+// belongs to the next request, letting a caller that taps the raw connection
+// determine exactly how many captured bytes belong to the current request.
+func (r *RequestReader) Buffered() int {
+	return r.reader.Buffered()
+}
+
 func (r *RequestReader) ReadRequest() (*http.Request, error) {
 	if !r.preventCanonicalization {
 		// Just call the HTTP library function if the preventCanonicalization

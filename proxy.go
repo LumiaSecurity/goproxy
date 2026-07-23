@@ -55,7 +55,28 @@ type ProxyHttpServer struct {
 	// during MITM proxying. This allows tracking/metrics of client-side TLS failures.
 	// The host parameter is the target host from the CONNECT request.
 	TLSHandshakeErrorHandler func(host string, err error, ctx *ProxyCtx)
+	// WireTap, when set, is called during MITM proxying with the raw on-wire
+	// bytes exchanged with the client (post-TLS-decrypt), once per request and
+	// once per response. It lets a caller observe exactly what was read from and
+	// written to the client connection, including any framework-level
+	// serialization the proxy applies. The raw slice is owned by the caller
+	// after the call (goproxy does not retain it). Never mutate the connection
+	// from here; it is observe-only. Nil (the default) disables the tap entirely,
+	// adding zero overhead.
+	WireTap func(ctx *ProxyCtx, stage WireStage, raw []byte)
 }
+
+// WireStage identifies which client-side on-wire capture a WireTap call carries.
+type WireStage int
+
+const (
+	// WireClientRequestIn is the raw request bytes read from the client
+	// (request line + headers + body), before the proxy forwards upstream.
+	WireClientRequestIn WireStage = iota
+	// WireClientResponseOut is the raw response bytes written back to the client
+	// (status line + headers + body), after the proxy's processing.
+	WireClientResponseOut
+)
 
 var hasPort = regexp.MustCompile(`:\d+$`)
 

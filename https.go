@@ -282,14 +282,25 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 		}
 		go func() {
 			// TODO: cache connections to the remote website
-			rawClientTls := tls.Server(proxyClient, tlsConfig)
-			defer rawClientTls.Close()
-			if err := rawClientTls.Handshake(); err != nil {
+			rawTLS := tls.Server(proxyClient, tlsConfig)
+			defer rawTLS.Close()
+			if err := rawTLS.Handshake(); err != nil {
 				ctx.Warnf("Cannot handshake client %v %v", r.Host, err)
 				if proxy.TLSHandshakeErrorHandler != nil {
 					proxy.TLSHandshakeErrorHandler(r.Host, err, ctx)
 				}
 				return
+			}
+
+			// Optionally tap the decrypted client connection to capture the raw
+			// on-wire request/response bytes. When WireTap is nil, rawClientTls is
+			// the bare TLS conn and there is zero overhead. The H2 and websocket
+			// paths below use rawTLS (untapped) to avoid buffering long-lived streams.
+			rawClientTls := io.ReadWriteCloser(rawTLS)
+			var wireTap *wireTapConn
+			if proxy.WireTap != nil {
+				wireTap = &wireTapConn{Conn: rawTLS}
+				rawClientTls = wireTap
 			}
 
 			clientTlsReader := http1parser.NewRequestReader(proxy.PreventCanonicalization, rawClientTls)
@@ -349,7 +360,7 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 								ctx.Warnf("HTTP2 connection failed: disallowed")
 								return false
 							}
-							tr := H2Transport{reader, rawClientTls, tlsConfig.Clone(), host}
+							tr := H2Transport{reader, rawTLS, tlsConfig.Clone(), host}
 							if _, err := tr.RoundTrip(req); err != nil {
 								ctx.Warnf("HTTP2 connection failed: %v", err)
 							} else {
@@ -380,6 +391,16 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 						}
 						ctx.Logf("resp %v", resp.Status)
 					}
+
+					// Capture the raw request bytes read from the client (request line,
+					// headers, and any body consumed while forwarding). Buffered()
+					// excludes read-ahead belonging to the next keep-alive request.
+					if wireTap != nil {
+						if raw := wireTap.takeRequest(clientTlsReader.Buffered()); raw != nil {
+							proxy.WireTap(ctx, WireClientRequestIn, raw)
+						}
+					}
+
 					origBody := resp.Body
 					resp = proxy.filterResponse(resp, ctx)
 					bodyModified := resp.Body != origBody
@@ -439,7 +460,7 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 							ctx.Warnf("Unable to use Websocket connection")
 							return false
 						}
-						proxy.proxyWebsocket(ctx, wsConn, rawClientTls)
+						proxy.proxyWebsocket(ctx, wsConn, rawTLS)
 						// We can't reuse connection after WebSocket handshake,
 						// by returning false here, the underlying connection will be closed
 						return false
@@ -475,6 +496,14 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 								ctx.Warnf("Cannot write TLS EOF from mitm'd client: %v", err)
 								return false
 							}
+						}
+					}
+
+					// Capture the raw response bytes written back to the client
+					// (status line, headers, and body as serialized on the wire).
+					if wireTap != nil {
+						if raw := wireTap.takeResponse(); raw != nil {
+							proxy.WireTap(ctx, WireClientResponseOut, raw)
 						}
 					}
 
