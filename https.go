@@ -449,8 +449,12 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 				req.RemoteAddr = r.RemoteAddr
 				ctx.Logf("req %v", r.Host)
 
-				if !strings.HasPrefix(req.URL.String(), scheme+"://") {
+				if !req.URL.IsAbs() {
+					// Origin-form request target (/path)
 					req.URL, err = url.Parse(scheme + "://" + r.Host + req.URL.String())
+				} else {
+					// Absolute-form request target
+					req.URL.Scheme = scheme
 				}
 
 				if continueLoop := func(req *http.Request) bool {
@@ -529,16 +533,27 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 						// and returns immediately without blocking on the body
 						// (or else we wouldn't be able to proxy WebSocket data).
 						resp.Body = nil
-						if err := resp.Write(client); err != nil {
+						// Buffer the head so it ships as one TLS record, not one tiny record per header (trips strict clients).
+						bw := bufio.NewWriter(client)
+						if err := resp.Write(bw); err != nil {
 							ctx.Warnf("Cannot write response header from mitm'd client: %v", err)
+							return false
+						}
+						if err := bw.Flush(); err != nil {
+							ctx.Warnf("Cannot flush response header from mitm'd client: %v", err)
 							return false
 						}
 						proxy.proxyWebsocket(ctx, wsConn, client)
 						return false
 					}
 
-					if err := resp.Write(client); err != nil {
+					bw := bufio.NewWriter(client)
+					if err := resp.Write(bw); err != nil {
 						ctx.Warnf("Cannot write response from mitm'd client: %v", err)
+						return false
+					}
+					if err := bw.Flush(); err != nil {
+						ctx.Warnf("Cannot flush response from mitm'd client: %v", err)
 						return false
 					}
 
