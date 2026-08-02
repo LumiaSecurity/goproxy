@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -712,4 +713,88 @@ type buffConn struct {
 
 func (c *buffConn) Read(b []byte) (int, error) {
 	return c.r.Read(b)
+}
+
+// mitmH2RequestProbe stands up an HTTP/2 backend that records what the upstream
+// actually received for the forwarded request (its ContentLength and body), fronts
+// it with an HTTP/2 MITM proxy, and returns a client speaking h2 to that proxy. It
+// lets tests assert on the request as it leaves the proxy toward the origin.
+func mitmH2RequestProbe(t *testing.T, gotLen *int64, gotBody *[]byte) (*http.Client, string, func()) {
+	t.Helper()
+
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, 2, r.ProtoMajor)
+		atomic.StoreInt64(gotLen, r.ContentLength)
+		b, _ := io.ReadAll(r.Body)
+		if gotBody != nil {
+			*gotBody = b
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	backend.EnableHTTP2 = true
+	backend.StartTLS()
+
+	proxy := goproxy.NewProxyHttpServer()
+	proxy.AllowHTTP2 = true
+	proxy.Tr = &http.Transport{
+		ForceAttemptHTTP2: true,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"h2"},
+		},
+	}
+	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+
+	proxySrv := httptest.NewServer(proxy)
+
+	client := createProxyClientH2(t, proxySrv.URL)
+	return client, backend.URL, func() {
+		proxySrv.Close()
+		backend.Close()
+	}
+}
+
+// TestMitmHTTP2BodylessRequestNoPhantomBody guards against forwarding a phantom
+// request body on bodyless HTTP/2 requests. Go's http2.Server hands the MITM handler
+// a non-nil (empty) Body with ContentLength 0 for a bodyless GET (unlike the HTTP/1.1
+// server, which uses http.NoBody). Forwarded as-is, the upstream http2.Transport
+// computes an unknown length (-1) and sends the request WITH a body stream, which
+// strict origins reject. The upstream must see ContentLength 0, not -1.
+func TestMitmHTTP2BodylessRequestNoPhantomBody(t *testing.T) {
+	var gotLen int64 = -999
+	client, backendURL, cleanup := mitmH2RequestProbe(t, &gotLen, nil)
+	defer cleanup()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, backendURL+"/app_start", nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	assert.Equal(t, int64(0), atomic.LoadInt64(&gotLen),
+		"a bodyless h2 request must reach the upstream with ContentLength 0, not a phantom body (-1)")
+}
+
+// TestMitmHTTP2RequestBodyPreserved is the counterpart to the bodyless case: a POST
+// carrying a body must still be forwarded upstream with its body and length intact,
+// proving the bodyless normalization does not strip real request bodies.
+func TestMitmHTTP2RequestBodyPreserved(t *testing.T) {
+	const payload = "hello-body"
+	var gotLen int64 = -999
+	var gotBody []byte
+	client, backendURL, cleanup := mitmH2RequestProbe(t, &gotLen, &gotBody)
+	defer cleanup()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, backendURL+"/api", strings.NewReader(payload))
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	assert.Equal(t, int64(len(payload)), atomic.LoadInt64(&gotLen))
+	assert.Equal(t, payload, string(gotBody))
 }

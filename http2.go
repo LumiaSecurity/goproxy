@@ -160,6 +160,17 @@ func (proxy *ProxyHttpServer) handleH2MitmStream(
 			RemoveProxyHeaders(ctx, req)
 		}
 
+		// Go's http2.Server hands the handler a non-nil (empty) Body with
+		// ContentLength 0 for a bodyless request (GET/HEAD/...), unlike the HTTP/1.1
+		// server, which uses http.NoBody. Forwarded as-is, the upstream
+		// http2.Transport computes an unknown length (-1) and sends the request with
+		// a phantom body stream, which strict origins reject. Drop the body for
+		// zero-length requests so bodyless stays bodyless upstream. Mirrors
+		// net/http/httputil.ReverseProxy, which does the same for ContentLength 0.
+		if req.ContentLength == 0 {
+			req.Body = http.NoBody
+		}
+
 		var err error
 		resp, err = ctx.RoundTrip(req)
 		if err != nil {
