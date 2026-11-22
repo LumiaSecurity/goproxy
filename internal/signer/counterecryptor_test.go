@@ -2,6 +2,7 @@ package signer_test
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"encoding/binary"
 	"io"
@@ -31,7 +32,7 @@ func fatalOnErr(t *testing.T, err error, msg string) {
 }
 
 func TestCounterEncDifferentConsecutive(t *testing.T) {
-	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 128)
+	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 1024)
 	fatalOnErr(t, err, "rsa.GenerateKey")
 	c, err := signer.NewCounterEncryptorRandFromKey(k, []byte("the quick brown fox run over the lazy dog"))
 	fatalOnErr(t, err, "NewCounterEncryptorRandFromKey")
@@ -46,7 +47,7 @@ func TestCounterEncDifferentConsecutive(t *testing.T) {
 }
 
 func TestCounterEncIdenticalStreams(t *testing.T) {
-	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 128)
+	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 1024)
 	fatalOnErr(t, err, "rsa.GenerateKey")
 	c1, err := signer.NewCounterEncryptorRandFromKey(k, []byte("the quick brown fox run over the lazy dog"))
 	fatalOnErr(t, err, "NewCounterEncryptorRandFromKey")
@@ -82,7 +83,7 @@ func stddev(data []int) float64 {
 }
 
 func TestCounterEncStreamHistogram(t *testing.T) {
-	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 128)
+	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 1024)
 	fatalOnErr(t, err, "rsa.GenerateKey")
 	c, err := signer.NewCounterEncryptorRandFromKey(k, []byte("the quick brown fox run over the lazy dog"))
 	fatalOnErr(t, err, "NewCounterEncryptorRandFromKey")
@@ -102,5 +103,26 @@ func TestCounterEncStreamHistogram(t *testing.T) {
 	t.Logf("ref:%v - act:%v = %v", refstddev, stddev, math.Abs(refstddev-stddev))
 	if math.Abs(refstddev-stddev) >= 1 {
 		t.Errorf("stddev of ref histogram different than regular PRNG: %v %v", refstddev, stddev)
+	}
+}
+
+func TestCounterEncDependsOnWholeKeyAndSeed(t *testing.T) {
+	stream := func(key any, seed string) []byte {
+		c, err := signer.NewCounterEncryptorRandFromKey(key, []byte(seed))
+		fatalOnErr(t, err, "NewCounterEncryptorRandFromKey")
+		out := make([]byte, 64)
+		_, _ = io.ReadFull(&c, out)
+		return out
+	}
+	_, k1, err := ed25519.GenerateKey(nil)
+	fatalOnErr(t, err, "ed25519.GenerateKey")
+	_, k2, err := ed25519.GenerateKey(nil)
+	fatalOnErr(t, err, "ed25519.GenerateKey")
+	const prefix = "0123456789abcdef"
+	if bytes.Equal(stream(k1, prefix+"a"), stream(k2, prefix+"a")) {
+		t.Error("different keys produce the same stream")
+	}
+	if bytes.Equal(stream(k1, prefix+"a"), stream(k1, prefix+"b")) {
+		t.Error("different seeds produce the same stream")
 	}
 }
