@@ -73,6 +73,12 @@ type ProxyHttpServer struct {
 	// during MITM proxying. This allows tracking/metrics of client-side TLS failures.
 	// The host parameter is the target host from the CONNECT request.
 	TLSHandshakeErrorHandler func(host string, err error, ctx *ProxyCtx)
+	// WireTap, when set, is called during HTTP/1.x MITM proxying with the raw
+	// on-wire bytes exchanged with the client (post-TLS-decrypt), once per request
+	// and once per response. The raw slice is owned by the caller after the call.
+	// It is observe-only. HTTP/2 and WebSocket traffic is not tapped. Nil (the
+	// default) disables the tap entirely.
+	WireTap func(ctx *ProxyCtx, stage WireStage, raw []byte)
 	// h2Server is the HTTP/2 server instance used for MITM.
 	// It is shared across all connections.
 	h2Server *http2.Server

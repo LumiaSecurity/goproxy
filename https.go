@@ -535,6 +535,14 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 				scheme = "https"
 			}
 
+			// The WebSocket path keeps rawClient so a long-lived stream is never buffered.
+			rawClient := client
+			var wireTap *wireTapConn
+			if proxy.WireTap != nil {
+				wireTap = &wireTapConn{Conn: client}
+				client = wireTap
+			}
+
 			clientReader := http1parser.NewRequestReader(proxy.PreventCanonicalization, client)
 			for !clientReader.IsEOF() {
 				req, err := clientReader.ReadRequest()
@@ -622,6 +630,14 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 						}
 						ctx.Logf("resp %v", resp.Status)
 					}
+
+					// Buffered() excludes read-ahead belonging to the next keep-alive request.
+					if wireTap != nil {
+						if raw := wireTap.takeRequest(clientReader.Buffered()); raw != nil {
+							proxy.WireTap(ctx, WireClientRequestIn, raw)
+						}
+					}
+
 					origBody := resp.Body
 					resp = proxy.filterResponse(resp, ctx)
 					bodyModified := resp.Body != origBody
@@ -679,7 +695,7 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 						// same write as the upgrade request, so those bytes are still
 						// in the request parser's buffer. Replay them before the raw
 						// connection instead of leaving them stranded.
-						proxy.proxyWebsocket(ctx, wsConn, bufferedClientReader(clientReader.Reader(), client), client)
+						proxy.proxyWebsocket(ctx, wsConn, bufferedClientReader(clientReader.Reader(), rawClient), rawClient)
 						return false
 					}
 
@@ -701,6 +717,12 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 					if err := resp.Write(writer); err != nil {
 						ctx.Warnf("Cannot write response from mitm'd client: %v", err)
 						return false
+					}
+
+					if wireTap != nil {
+						if raw := wireTap.takeResponse(); raw != nil {
+							proxy.WireTap(ctx, WireClientResponseOut, raw)
+						}
 					}
 
 					return !resp.Close
